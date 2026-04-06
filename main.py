@@ -361,8 +361,9 @@ def run_backtest(symbols, months=6, starting_capital=10_000, risk_pct=0.01):
                 for s in support_levels
             )
             long_flip = any(
-                float(prev_candle["close"]) < r and float(candle["close"]) > r
+                float(candle["close"]) > r * (1 - SR_BOX_PCT)
                 for r in resistance_levels
+                if r > float(candle["close"]) * 0.98
             )
 
             # Condizioni SHORT
@@ -371,8 +372,9 @@ def run_backtest(symbols, months=6, starting_capital=10_000, risk_pct=0.01):
                 for r in resistance_levels
             )
             short_flip = any(
-                float(prev_candle["close"]) > s and float(candle["close"]) < s
+                float(candle["close"]) < s * (1 + SR_BOX_PCT)
                 for s in support_levels
+                if s < float(candle["close"]) * 1.02
             )
 
             direction = sl = tp1 = tp2 = None
@@ -533,176 +535,4 @@ st.caption("H1/H2 signal engine · ICT/SMC methodology · Top 30 crypto by marke
 
 # Session state
 for key, default in [
-    ("signals", []),
-    ("log", []),
-    ("last_scan", None),
-    ("signal_history", [])
-]:
-    if key not in st.session_state:
-        st.session_state[key] = default
-
-tab1, tab2, tab3 = st.tabs(["🎯 Dashboard", "📊 Backtest", "📜 Log"])
-
-# ---- TAB 1: DASHBOARD ----
-with tab1:
-    header_col, btn_col = st.columns([4, 1])
-
-    with btn_col:
-        if is_weekend():
-            st.error("⛔ Weekend\nSegnali soppressi")
-        else:
-            st.success("✅ Market active")
-        scan_btn = st.button("🔍 Scan Now", type="primary", use_container_width=True)
-        if st.session_state.last_scan:
-            st.caption(f"Ultimo scan: {st.session_state.last_scan}")
-
-    with header_col:
-        run_scan = scan_btn or st.session_state.last_scan is None
-
-        if run_scan:
-            with st.spinner("Scansione 30 asset in corso..."):
-                symbols        = get_top30_symbols()
-                new_signals    = []
-                new_log        = []
-                btc_breakdown  = check_btc_breakdown()
-
-                if btc_breakdown:
-                    new_log.append("⚠️ BTC BREAKDOWN — altcoin signals soppressi")
-
-                for asset in symbols:
-                    signal, logs = analyze_asset(asset, btc_breakdown)
-                    new_log.extend(logs)
-                    if signal:
-                        new_signals.append(signal)
-                        st.session_state.signal_history.append({
-                            **signal,
-                            "scan_time": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-                        })
-
-                st.session_state.signals   = new_signals
-                st.session_state.log       = new_log
-                st.session_state.last_scan = datetime.utcnow().strftime("%H:%M:%S UTC")
-
-        signals = st.session_state.signals
-        longs   = [s for s in signals if s["direction"] == "LONG"]
-        shorts  = [s for s in signals if s["direction"] == "SHORT"]
-
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Total Signals", len(signals))
-        m2.metric("📗 Long",       len(longs))
-        m3.metric("📕 Short",      len(shorts))
-        m4.metric("Active",        len(signals))
-
-        if len(signals) > 6:
-            st.warning(f"⚠️ {len(signals)} segnali — troppi. Qualcosa non va, controlla i threshold.")
-
-        if not signals:
-            st.info("🧘 Nessun segnale — in attesa di un setup valido. **Patience is a position.**")
-        else:
-            rows = [{
-                "Asset":        s["asset"],
-                "Dir":          s["direction"],
-                "TF":           s["timeframe"],
-                "Entry Zone":   f"{s['entry_low']} – {s['entry_high']}",
-                "SL":           s["sl"],
-                "TP1 (50%)":    s["tp1"],
-                "TP2 (50%)":    s["tp2"],
-                "Trigger":      s["trigger"],
-                "Vol ✓":        "✅" if s["volume_confirmed"] else "❌",
-                "Macro Context":s["macro_context"],
-                "Time":         s["timestamp"]
-            } for s in signals]
-
-            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-            csv = pd.DataFrame(rows).to_csv(index=False)
-            st.download_button("📥 Export CSV", csv, "signals.csv", "text/csv")
-
-# ---- TAB 2: BACKTEST ----
-with tab2:
-    st.subheader("📊 Backtest Engine")
-    st.caption("Stessa logica segnali applicata su dati storici Binance H1")
-
-    c1, c2, c3 = st.columns(3)
-    bt_capital = c1.number_input("Capital ($)",       value=10000, step=1000, min_value=1000)
-    bt_risk    = c2.number_input("Risk/trade (%)",    value=1.0, min_value=0.1, max_value=5.0, step=0.1)
-    bt_months  = c3.selectbox("Periodo",              [3, 6, 12], index=1)
-    bt_scope   = st.selectbox("Asset da testare",     ["BTC only", "BTC + ETH", "Top 10", "All 30"])
-
-    if st.button("▶️ Run Backtest", type="primary"):
-        symbols = get_top30_symbols()
-        if bt_scope == "BTC only":
-            symbols = [s for s in symbols if s["symbol"] == "BTCUSDT"]
-        elif bt_scope == "BTC + ETH":
-            symbols = [s for s in symbols if s["symbol"] in ["BTCUSDT","ETHUSDT"]]
-        elif bt_scope == "Top 10":
-            symbols = symbols[:10]
-
-        results, equity_curve = run_backtest(
-            symbols,
-            months=bt_months,
-            starting_capital=bt_capital,
-            risk_pct=bt_risk / 100
-        )
-
-        if not results:
-            st.warning("Nessun trade generato. Prova a estendere il periodo o usare più asset.")
-        else:
-            m = compute_metrics(results, bt_capital)
-
-            # Sanity check
-            if m["final_equity"] > bt_capital * 20:
-                st.error("🚨 CALCULATION ERROR: equity > 20x — risultati inaffidabili")
-            else:
-                cols = st.columns(6)
-                cols[0].metric("Win Rate",      f"{m['win_rate']}%",       f"{m['wins']}W / {m['losses']}L")
-                cols[1].metric("Partial Wins",  m['partials'])
-                cols[2].metric("Avg R:R",        m['avg_rr'])
-                cols[3].metric("Total Trades",   m['total_trades'])
-                cols[4].metric("Max Drawdown",  f"{m['max_drawdown']}%")
-                cols[5].metric("Profit Factor",  m['profit_factor'])
-
-                st.metric("Total Return", f"{m['total_return']}%",
-                          f"${m['final_equity']:,.0f} equity finale")
-
-                # Equity curve
-                eq_df = pd.DataFrame(equity_curve)
-                fig   = go.Figure()
-                fig.add_trace(go.Scatter(
-                    x=eq_df["trade"], y=eq_df["equity"],
-                    mode="lines", name="Equity",
-                    line=dict(color="#00ff88", width=2)
-                ))
-                fig.add_hline(y=bt_capital, line_dash="dash", line_color="#888",
-                              annotation_text="Starting Capital")
-                fig.update_layout(
-                    title="Equity Curve (trade per trade)",
-                    xaxis_title="Trade #",
-                    yaxis_title="Equity ($)",
-                    template="plotly_dark",
-                    height=400
-                )
-                st.plotly_chart(fig, use_container_width=True)
-
-                df_res = pd.DataFrame(results)[
-                    ["trade","date","asset","direction","entry","sl","tp1","tp2","outcome","profit_usd","equity"]
-                ]
-                st.dataframe(df_res, use_container_width=True, hide_index=True)
-                st.download_button("📥 Export Backtest CSV",
-                                   df_res.to_csv(index=False),
-                                   "backtest.csv", "text/csv")
-
-# ---- TAB 3: LOG ----
-with tab3:
-    st.subheader("📜 Session Log")
-    if st.session_state.log:
-        st.text_area("", "\n".join(st.session_state.log), height=400)
-        if st.button("🗑️ Clear Log"):
-            st.session_state.log = []
-            st.rerun()
-    else:
-        st.info("Esegui uno scan per popolare il log.")
-
-    if st.session_state.signal_history:
-        st.subheader("Storico segnali (sessione corrente)")
-        st.dataframe(pd.DataFrame(st.session_state.signal_history),
-                     use_container_width=True, hide_index=True)
+    ("signals", []
